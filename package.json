@@ -1,0 +1,11 @@
+{
+  "name": "consistent-hashing",
+  "version": "1.0.0",
+  "description": "",
+  "main": "",
+  "scripts": {
+    "test": ""
+  },
+  "keywords": [],
+  "license": "ISC"
+}
