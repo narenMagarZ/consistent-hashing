@@ -2,21 +2,29 @@ const http = require("http");
 const murmur = require("murmurhash3js");
 const { exec } = require("node:child_process");
 
-const backendServers = new Map();
+const backendServers = [];
+const hashRing = [];
 
 function buildProxy(port) {
 	http
 		.createServer(async (req, res) => {
-			const targetServer = getServer(req.socket.remotePort);
+			const reqId = req.headers['x-request-id'];
+			// simple hash
+			// const targetServer = getServer(reqId || req.socket.remotePort);
+
+			// consistent hash 
+			const targetServer = consistentHash(reqId || req.socket.remotePort);
+			console.log(targetServer, 'target server')
 			const targetUrl = new URL(targetServer);
-            console.log(targetUrl, 'target url')
+
 			const proxyReq = http.request(
 				{
 					hostname: targetUrl.hostname,
 					host: targetUrl.host,
-					path: targetUrl.url,
-					headers: targetUrl.headers,
-					method: targetUrl.method,
+					path: req.url,
+					headers: req.headers,
+					method: req.method,
+					port: targetUrl.port,
 				},
 				(proxyRes) => {
 					res.writeHead(proxyRes.statusCode ?? 500, proxyRes.headers);
@@ -43,42 +51,90 @@ function hash(key) {
 	return murmur.x86.hash32(key);
 }
 
+function consistentHash(key) {
+	const hashed = hash(key);
+	let left = 0;
+	let right = hashRing.length - 1;
+
+	while (left <= right) {
+		const mid = Math.floor((left + right) / 2);
+
+		if (hashRing[mid].hash >= hashed) {
+			right = mid - 1;
+		} else {
+			left = mid + 1;
+		}
+	}
+
+	return hashRing[left % hashRing.length].server;
+}
+
+function buildHashRing(servers = []) {
+	hashRing.length = 0;
+	for (const server of servers) {
+		hashRing.push({ key: hash(server), origin: server });
+	}
+	return hashRing.sort((a, b) => a.key - b.key);
+}
+
 function getServer(key) {
     const hashed = hash(key);
-    console.log(hashed)
 	const index = hashed % backendServers.length;
-    console.log(index, 'index')
 	return backendServers[index];
 }
 
 function discoverServers() {
-	setInterval(() => {
-		exec("lsof -nP -iTCP -sTCP:LISTEN", async (error, stdout) => {
-			if (error) {
-				console.error(error);
-				return;
-			}
+	exec("lsof -nP -iTCP -sTCP:LISTEN", async (error, stdout) => {
+		if (error) {
+			console.error(error);
+			process.exit(1);
+		}
 
-            const process = stdout.split("\n");
-			const regex = /^node.*\*:(6\d+)/;
-			const serverPorts = process.filter((process) => process.match(regex)).map((process) => Number(process.match(regex)?.[1]));
+		const process = stdout.split("\n");
+		const regex = /^node.*\*:(6\d+)/;
+		const regexV2 = /^com.docke.*\*:(6\d+)/;
 
-			// will discover healthy servers
-			for (const port of serverPorts) {
-				const url = `http://localhost:${port}/api/health`;
-				try {
-					const response = await fetch(url);
-					if (response.ok) {
-						console.log(`${port} is healthy`);
-						backendServers.set(port, url);
-					}
-				} catch (error) {
-					console.log(`${port} is unreachable`);
+		const v1Ports = process.filter((process) => process.match(regex)).map((process) => Number(process.match(regex)?.[1]));
+		const v2Ports = process.filter((process) => process.match(regexV2)).map((process) => Number(process.match(regexV2)?.[1]));
+
+		const mergedPorts = v1Ports.concat(v2Ports)
+
+
+		// will discover healthy servers
+		for (const port of mergedPorts) {
+			const origin = `http://localhost:${port}`;
+			const healthCheckUrl = `${origin}/api/health`;
+			try {
+				const response = await fetch(healthCheckUrl);
+				if (response.ok) {
+					console.log(`${port} is healthy`);
+					
+					const index = backendServers.findIndex(server => server === origin);
+					const ringIndex = hashRing.findIndex(node => node.server === origin);
+
+					if (index === -1) backendServers.push(origin);
+					if (ringIndex === -1) hashRing.push({ key: hash(origin), origin });
+					
+					continue;
 				}
+			} catch (error) {
+				console.log(`${port} is unreachable`);
 			}
-		});
-	}, 2_000);
+
+		}
+
+		// build ring of servers
+		buildHashRing(hashRing);
+	});
 }
 
 discoverServers();
+setInterval(() => {
+	console.log('searching for servers....')
+	discoverServers()
+	if (backendServers.length === 0) {
+		console.log('no servers found!')
+	}
+}, 20_000);
+
 buildProxy(process.env.PORT ?? 5001);

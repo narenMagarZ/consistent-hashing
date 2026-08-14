@@ -2,7 +2,9 @@ const http = require("http");
 
 function buildServer(port) {
 	const server = http.createServer((req, res) => {
-        console.log(req.socket.remotePort, 'port')
+		const requestId = req.headers['x-request-id'];
+		console.log(requestId, 'handled by server', port);
+		
 		if (req.url === "/api/health") {
 			return res.end("Okay");
 		}
