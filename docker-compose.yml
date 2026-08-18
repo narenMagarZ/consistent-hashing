@@ -1,0 +1,24 @@
+services:
+  server:
+    build: ./backend-server
+    expose:
+      - "6001"
+    networks:
+      - common
+
+  proxy:
+    build: ./proxy-server
+    ports:
+      - "5001:5001"
+    environment:
+      DISCOVERY_MODE: service
+      DISCOVERY_SERVICE_NAME: server
+      DISCOVERY_SERVICE_PORT: 6001
+    depends_on:
+      - server
+    networks:
+      - common
+
+
+networks:
+  common:
